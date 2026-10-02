@@ -1,8 +1,8 @@
 {
   "name": "Saigon Now",
   "short_name": "Saigon Now",
-  "description": "ホーチミンの渋滞・雨雲レーダー・バイクの道順をひと目で",
-  "lang": "ja",
+  "description": "HCMC traffic, rain radar & motorbike routes · Kẹt xe, radar mưa, đường xe máy TP.HCM",
+  "lang": "en",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
