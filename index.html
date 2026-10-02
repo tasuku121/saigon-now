@@ -1240,10 +1240,14 @@ function estimateMotion(P, Lg, W, H, minutes, maxS = 14) {
 }
 // レーダーの「映り込み」除去。ホーチミン中心部には、晴れていても雨のように映る反射（建物などの地上の映り込み）が
 // 50分以上ずっと同じ升目に出続ける（2026-10-01 の晴天時に、空港の観測「雨なし」と見比べて確認）。本物の雨雲は動いたり形を変えたりする。
+//  ・2時間（13コマ）のうち11コマ以上、映り込み範囲の中の同じ升目にある反射 … 予報やまわりの雨に関係なく消す
+//    ただし、範囲の外にも2時間続くまとまった雨が20升以上あるとき（広い範囲に長く降る雨）は消さない
+//    （2026-10-02 16時、まわりを夕立が動く中、中心部だけ2時間ずっと40〜55dBZ＝「激しい雨」と出た。
+//      1区の雨量計 Cô Bắc は1日で3.6mm。2時間続く反射は範囲の中に654升、外には4升だけだった）
 //  ・予報が「いまの1時間は降らない」と言うとき … どこでも、7コマ中5コマ以上同じ升目にある反射と、周りに何もない1升だけの点を消す
 //  ・予報がはっきりしないとき（5モデルの平均が50%未満） … 映り込みの出る範囲（CLUTTER）の中だけ、同じように消す
-//  ・予報が「降る」と言うとき（平均50%以上） … 本物の雨を消さないよう、何も消さない
-//  ・映り込み範囲の外（市街地のまわり約50km）にも、まとまった雨があるとき … 本物の雨が来ているので、何も消さない
+//  ・予報が「降る」と言うとき（平均50%以上） … 本物の雨を消さないよう、1時間の居座りでは消さない
+//  ・映り込み範囲の外（市街地のまわり約50km）にも、まとまった雨があるとき … 本物の雨が来ているので、1時間の居座りでは消さない
 //    （2026-10-01 16時、街全体を覆って1時間近く降り続いた雨を「居座り」とみなして消し、画面が「雨なし」になった）
 // 夕立のように新しく湧いた雨雲は「居座り」にならないので残る。
 // CLUTTER＝2026-10-01 09:20〜10:30 と 11:00〜12:00（どちらも空港は雨なし）に、50分以上居座った反射の升目（ズーム7の升目座標）
@@ -1254,6 +1258,12 @@ function inClutter(gx, gy) {
   if (x < 0 || y < 0 || x >= CLUTTER.n || y >= CLUTTER.n) return false;
   const i = y * CLUTTER.n + x;
   return ((clutterBits[i >> 3] >> (i & 7)) & 1) === 1;
+}
+// 映り込み範囲を1升ふくらませたもの。範囲の中の小さな穴にも映り込みは出る
+// （2026-10-02、1区の穴の升だけが2時間ずっと50dBZのまま残り、「激しい雨」と出続けた）
+function nearClutter(gx, gy) {
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (inClutter(gx + dx, gy + dy)) return true;
+  return false;
 }
 function modelsSayDry() {
   const now = modelHours(1)[0];   // いまの1時間：5モデルの平均が20%未満、いちばん高いモデルでも35%未満
@@ -1272,27 +1282,59 @@ function rainAround(g, W, H, x0, y0) {
   }
   return n;
 }
-function removeStatic(grids, W, x0, y0) {
-  if (rainAround(grids[grids.length - 1], W, grids[0].length / W, x0, y0) >= 20) return 0;   // まわりにも雨 → 本物の雨なので消さない
-  const dry = modelsSayDry(), now = modelHours(1)[0];
-  if (!dry && now && now.mean >= 50) return 0;
-  const N = grids.length, P = grids[0].length, last = grids[N - 1];
-  const target = (p) => dry || inClutter(x0 + (p % W), y0 + Math.floor(p / W));
-  let removed = 0;
-  for (let p = 0; p < P; p++) {
-    if (!target(p)) continue;
-    let n = 0;
-    for (const g of grids) if (g[p] >= 10) n++;
-    if (n >= N - 2) { for (const g of grids) g[p] = -1; removed++; }
+// 範囲の外で、2時間ずっと続いている「まとまった雨」の升の数。広い範囲に長く降る雨なら、範囲の外でも長く続く
+function longRainOutside(all, W, H, x0, y0) {
+  const N = all.length, last = all[N - 1];
+  const cx = CLUTTER.x0 + CLUTTER.n / 2 - x0, cy = CLUTTER.y0 + CLUTTER.n / 2 - y0, R = 45;
+  let n = 0;
+  for (let y = Math.max(1, cy - R); y <= Math.min(H - 2, cy + R); y++) for (let x = Math.max(1, cx - R); x <= Math.min(W - 2, cx + R); x++) {
+    const p = y * W + x;
+    if (last[p] < 20 || (x - cx) ** 2 + (y - cy) ** 2 > R * R || nearClutter(x0 + x, y0 + y)) continue;
+    let nb = 0, k = 0;
+    for (const d of [-W - 1, -W, -W + 1, -1, 1, W - 1, W, W + 1]) if (last[p + d] >= 15) nb++;
+    if (nb < 3) continue;
+    for (const g of all) if (g[p] >= 20) k++;
+    if (k >= N - 2) n++;
   }
-  for (let p = W + 1; p < P - W - 1; p++) {
+  return n;
+}
+// grids＝表示に使う直近7コマ、older＝その前のコマ（2時間の居座りを見るため。読めなかったときは空）
+function removeStatic(grids, W, x0, y0, older = []) {
+  const N = grids.length, P = grids[0].length, H = P / W, last = grids[N - 1];
+  const inC = (p) => inClutter(x0 + (p % W), y0 + Math.floor(p / W));
+  const inC1 = (p) => nearClutter(x0 + (p % W), y0 + Math.floor(p / W));
+  const around = rainAround(last, W, H, x0, y0);
+  let removed = 0, target = null;
+  const all = [...older, ...grids], N2 = all.length;
+  if (N2 >= 10 && longRainOutside(all, W, H, x0, y0) < 20) {   // 2時間の居座り（映り込み範囲の中）
+    target = inC1;
+    for (let p = 0; p < P; p++) {
+      if (!inC1(p)) continue;
+      let n = 0;
+      for (const g of all) if (g[p] >= 10) n++;
+      if (n >= N2 - 2) { for (const g of grids) g[p] = -1; removed++; }
+    }
+  }
+  const dry = modelsSayDry(), now = modelHours(1)[0];
+  if (around < 20 && (dry || !now || now.mean < 50)) {   // 1時間の居座り（まわりに雨がなく、予報も「降る」と言っていないとき）
+    target = dry ? () => true : inC;
+    for (let p = 0; p < P; p++) {
+      if (!target(p)) continue;
+      let n = 0;
+      for (const g of grids) if (g[p] >= 10) n++;
+      if (n >= N - 2) { for (const g of grids) g[p] = -1; removed++; }
+    }
+  }
+  if (!target) return removed;
+  for (let p = W + 1; p < P - W - 1; p++) {   // まわりに何もない1升だけの点
     if (last[p] < 10 || !target(p)) continue;
     let nb = 0;
     for (const d of [-W - 1, -W, -W + 1, -1, 1, W - 1, W, W + 1]) if (last[p + d] >= 10) nb++;
     if (nb === 0) { last[p] = -1; removed++; }
   }
   return removed;
-}function shiftGrid(g, W, H, vx, vy, k) {
+}
+function shiftGrid(g, W, H, vx, vy, k) {
   const out = new Int8Array(W * H).fill(-1);
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
     const sx = Math.round(x - vx * k), sy = Math.round(y - vy * k);
@@ -1344,14 +1386,18 @@ async function loadRadar(force) {
 async function analyzeRadar() {
   if (!radar.frames.length) return;
   // 行き先がまだ無いときは、現在地（なければ1区）を中心に雨雲だけ描く
-  const t = trip, routes = t ? t.routes : [], past = radar.frames.slice(-7), latest = past.at(-1), prev = past.at(-4) || past[0], mid = tripMid(t);
+  const t = trip, routes = t ? t.routes : [], past = radar.frames.slice(-7), older = radar.frames.slice(-13, -7), latest = past.at(-1), prev = past.at(-4) || past[0], mid = tripMid(t);
   try {
     const c = toPx(mid.lat, mid.lon), x0 = Math.floor(c.x) - NC_HALF, y0 = Math.floor(c.y) - NC_HALF, W = NC_HALF * 2, H = W;
     const corners = [fromPx(x0, y0), fromPx(x0 + W, y0), fromPx(x0, y0 + H), fromPx(x0 + W, y0 + H)];
     const along = routes.flatMap((r) => r.line.filter((_, i) => i % 20 === 0).map(([lat, lon]) => ({ lat, lon })));
     const S = await sampler(latest.path, [...(t ? [t.from, t.to] : []), mid, ...along, ...corners]);
-    const grids = await Promise.all(past.map(async (f) => radarGrid(f === latest ? S : await sampler(f.path, corners, 1), x0, y0, W, H)));
-    const removed = removeStatic(grids, W, x0, y0);
+    // 映り込みの判定（2時間の居座り）用に、その前の1時間も読む。読めなければ使わない
+    const [grids, olderGrids] = await Promise.all([
+      Promise.all(past.map(async (f) => radarGrid(f === latest ? S : await sampler(f.path, corners, 1), x0, y0, W, H))),
+      Promise.all(older.map(async (f) => radarGrid(await sampler(f.path, corners, 1), x0, y0, W, H))).catch(() => []),
+    ]);
+    const removed = removeStatic(grids, W, x0, y0, olderGrids);
     const Lg = grids.at(-1), Pg = grids[past.indexOf(prev)];
     const gAt = (g, lat, lon) => { const p = toPx(lat, lon), lx = Math.floor(p.x) - x0, ly = Math.floor(p.y) - y0; return lx >= 0 && ly >= 0 && lx < W && ly < H ? g[ly * W + lx] : S(p.x, p.y); };
     let echo = 0;
@@ -1378,7 +1424,7 @@ async function analyzeRadar() {
     console.error(e);
     radar.err = true;
   }
-  renderCommute(); syncCommuteRadar();
+  renderCommute(); syncCommuteRadar(); mRadar?.sync();
 }
 
 /* ── いま・これから（1枚にまとめた表） ── */
@@ -2053,48 +2099,71 @@ function applyMapTone(map) {
 }
 function makeRadarCtl(map, p) {
   const label = $(`#${p}-rlabel`), btn = $(`#${p}-play`), chk = $(`#${p}-radarOn`);
-  const ctl = { layers: [], frames: [], cur: -1, on: true, timer: null, key: "" };
+  const ctl = { layers: [], frames: [], cur: -1, on: true, timer: null, key: "", own: false, bounds: null };
   const attrib = 'Radar © <a href="https://www.rainviewer.com/" target="_blank">RainViewer</a>';   // 出典の表記は言語によらず英語
+  // ルート検索と同じ、映り込みを消した雨雲を描く（RainViewer の画像のままだと、中心部の映り込みが「激しい雨」に見える）。
+  // 解析の範囲（現在地のまわり約230km四方）に地図が入っていないときだけ、RainViewer の画像をそのまま重ねる
+  if (!map.getPane("radarPane")) map.createPane("radarPane").style.zIndex = 350;   // 雨は地図の上・地名やピンの下
+  const ownRain = () => {
+    if (!rain) return false;
+    const { x0, y0, W, H } = rain.rf, c = map.getCenter(), q = toPx(c.lat, c.lng);
+    return q.x > x0 && q.y > y0 && q.x < x0 + W && q.y < y0 + H;
+  };
   ctl.sync = () => {
     if (!radar.frames.length) return;
-    const frames = radar.frames.slice(-7), key = frames.map((f) => f.path).join();
-    if (key !== ctl.key) {
-      stop(true);
-      ctl.layers.forEach((l) => map.removeLayer(l));
-      ctl.layers = frames.map((f) => L.tileLayer(`${radar.host}${f.path}/256/{z}/{x}/{y}/2/1_1.png`, { opacity: 0, maxNativeZoom: RZ, maxZoom: 19, zIndex: 5, attribution: attrib }));
-      ctl.frames = frames; ctl.key = key;
-    }
-    ctl.show(ctl.layers.length - 1);
+    const own = ownRain(), frames = own ? rain.rf.frames.slice(0, rain.rf.latest + 1) : radar.frames.slice(-7);
+    const key = own ? `own:${rain.time}:${rain.tripId}:${rain.removed}:${rain.rf.x0},${rain.rf.y0}` : frames.map((f) => f.path).join();
+    if (key === ctl.key) return;
+    stop(true);
+    ctl.layers.forEach((l) => map.removeLayer(l));
+    ctl.layers = own ? [] : frames.map((f) => L.tileLayer(`${radar.host}${f.path}/256/{z}/{x}/{y}/2/1_1.png`, { opacity: 0, maxNativeZoom: RZ, maxZoom: 19, zIndex: 5, attribution: attrib }));
+    if (own) { const { x0, y0, W, H } = rain.rf, nw = fromPx(x0, y0), se = fromPx(x0 + W, y0 + H); ctl.bounds = L.latLngBounds([se.lat, nw.lon], [nw.lat, se.lon]); }
+    ctl.frames = frames; ctl.key = key; ctl.own = own;
+    ctl.show(frames.length - 1);
   };
   ctl.show = (i) => {
-    const l = ctl.layers[i];
-    if (!l) return;
-    if (ctl.on && !map.hasLayer(l)) map.addLayer(l);
-    // レーダーは1ピクセル≒1.2km。拡大するほど画面全体が1色になるので薄くする
-    const z = map.getZoom(), op = z <= 11 ? 0.6 : z <= 13 ? 0.45 : 0.3;
-    ctl.layers.forEach((x, k) => x.setOpacity(ctl.on && k === i ? op : 0));
+    const f = ctl.frames[i];
+    if (!f) return;
+    let empty = false;
+    if (ctl.own) {
+      f.url = f.url || rainImage(f.g, rain.rf.W, rain.rf.H);   // ルート検索の地図と同じ絵（コマごとに一度だけ描く）
+      if (f.mx == null) { f.mx = -1; for (const v of f.g) if (v > f.mx) f.mx = v; }
+      empty = f.mx < 15;
+      if (!ctl.layers[0]) ctl.layers[0] = L.imageOverlay(f.url, ctl.bounds, { pane: "radarPane", interactive: false, attribution: attrib });
+      else ctl.layers[0].setUrl(f.url);
+      const l = ctl.layers[0];
+      if (ctl.on && !map.hasLayer(l)) map.addLayer(l);
+      if (!ctl.on && map.hasLayer(l)) map.removeLayer(l);
+    } else {
+      const l = ctl.layers[i];
+      if (!l) return;
+      if (ctl.on && !map.hasLayer(l)) map.addLayer(l);
+      // レーダーは1ピクセル≒1.2km。拡大するほど画面全体が1色になるので薄くする
+      const z = map.getZoom(), op = z <= 11 ? 0.6 : z <= 13 ? 0.45 : 0.3;
+      ctl.layers.forEach((x, k) => x.setOpacity(ctl.on && k === i ? op : 0));
+    }
     ctl.cur = i;
-    const latest = i === ctl.layers.length - 1;
-    label.textContent = ctl.on ? T(latest ? "{t} 観測（最新）" : "{t} 観測", { t: fmtUnix(ctl.frames[i].time) }) : "";
+    const latest = i === ctl.frames.length - 1;
+    label.textContent = ctl.on ? T(latest ? "{t} 観測（最新）" : "{t} 観測", { t: fmtUnix(f.time) }) + (empty ? T("・雨雲なし") : "") : "";
   };
   // 言語を切り替えたときの出し直し
   ctl.relabel = () => { btn.textContent = T(ctl.timer ? "■ 止める" : "▶ 過去1時間"); if (ctl.cur >= 0) ctl.show(ctl.cur); };
   function stop(silent) {
     clearInterval(ctl.timer); ctl.timer = null; btn.textContent = T("▶ 過去1時間");
-    if (!silent) ctl.show(ctl.layers.length - 1);
+    if (!silent) ctl.show(ctl.frames.length - 1);
   }
   btn.textContent = T("▶ 過去1時間");
   btn.addEventListener("click", () => {
     if (ctl.timer) { stop(); return; }
-    if (!ctl.layers.length) return;
+    if (!ctl.frames.length) return;
     ctl.on = true; chk.checked = true;
-    ctl.layers.forEach((l) => { if (!map.hasLayer(l)) map.addLayer(l); });
+    if (!ctl.own) ctl.layers.forEach((l) => { if (!map.hasLayer(l)) map.addLayer(l); });
     btn.textContent = T("■ 止める");
     let i = 0;
     ctl.show(i);
-    ctl.timer = setInterval(() => { i++; if (i >= ctl.layers.length) stop(); else ctl.show(i); }, 800);
+    ctl.timer = setInterval(() => { i++; if (i >= ctl.frames.length) stop(); else ctl.show(i); }, 800);
   });
-  chk.addEventListener("change", () => { ctl.on = chk.checked; if (!ctl.on) stop(true); ctl.show(ctl.cur < 0 ? ctl.layers.length - 1 : ctl.cur); });
+  chk.addEventListener("change", () => { ctl.on = chk.checked; if (!ctl.on) stop(true); ctl.show(ctl.cur < 0 ? ctl.frames.length - 1 : ctl.cur); });
   map.on("zoomend", () => { if (ctl.cur >= 0) ctl.show(ctl.cur); });
   return ctl;
 }
